@@ -1,0 +1,39 @@
+name: Gold Trader Bot
+
+  on:
+    schedule:
+      - cron: '*/15 0-22 * * 1-5'
+    workflow_dispatch:
+
+  jobs:
+    run-trader:
+      runs-on: ubuntu-latest
+      timeout-minutes: 10
+
+      steps:
+        - uses: actions/checkout@v4
+        - uses: actions/setup-python@v5
+          with:
+            python-version: '3.11'
+        - run: pip install -r requirements.txt
+        - uses: actions/download-artifact@v4
+          with:
+            name: portfolio-db
+            path: data/
+          continue-on-error: true
+        - run: python main.py
+          env:
+            GOLDAPI_KEY: ${{ secrets.GOLDAPI_KEY }}
+            OPENEXCHANGE_KEY: ${{ secrets.OPENEXCHANGE_KEY }}
+            NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
+            GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+            TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+            TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+            INITIAL_GOLD_GRAMS: ${{ secrets.INITIAL_GOLD_GRAMS }}
+            INITIAL_CASH_TRY: ${{ secrets.INITIAL_CASH_TRY }}
+        - uses: actions/upload-artifact@v4
+          if: always()
+          with:
+            name: portfolio-db
+            path: data/portfolio.db
+            retention-days: 35
