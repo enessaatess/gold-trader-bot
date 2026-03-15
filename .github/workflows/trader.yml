@@ -1,4 +1,4 @@
-name: Gold Trader Bot
+  name: Gold Trader Bot
 
   on:
     schedule:
@@ -12,15 +12,19 @@ name: Gold Trader Bot
 
       steps:
         - uses: actions/checkout@v4
+
         - uses: actions/setup-python@v5
           with:
             python-version: '3.11'
+
         - run: pip install -r requirements.txt
+
         - uses: actions/download-artifact@v4
           with:
             name: portfolio-db
             path: data/
           continue-on-error: true
+
         - run: python main.py
           env:
             GOLDAPI_KEY: ${{ secrets.GOLDAPI_KEY }}
@@ -31,6 +35,7 @@ name: Gold Trader Bot
             TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
             INITIAL_GOLD_GRAMS: ${{ secrets.INITIAL_GOLD_GRAMS }}
             INITIAL_CASH_TRY: ${{ secrets.INITIAL_CASH_TRY }}
+
         - uses: actions/upload-artifact@v4
           if: always()
           with:
