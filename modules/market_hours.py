@@ -43,8 +43,8 @@ def is_market_open() -> bool:
     if _is_us_holiday(now_utc):
         return False
 
-    # Gece arası düşük likidite: 22:00-00:00 UTC
-    if now_utc.hour >= 22 or now_utc.hour < 1:
+    # Gece arası düşük likidite: 22:00-02:00 UTC (gece yarısından sonra da kapalı)
+    if now_utc.hour >= 22 or now_utc.hour < 2:
         return False
 
     return True

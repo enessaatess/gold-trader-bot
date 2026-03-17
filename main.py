@@ -32,30 +32,84 @@ from modules import (
 )
 
 
+def _send_market_closed_if_needed():
+    """
+    Piyasa kapalı bildirimini spam'ı önlemek için sadece 3 saatte bir gönderir.
+    Bir dosyaya son gönderim zamanını kaydederek kontrol eder.
+    """
+    import json
+    from datetime import datetime
+
+    state_file = os.path.join(os.path.dirname(__file__), "logs", "market_closed_state.json")
+    cooldown_hours = 3
+
+    try:
+        # Son gönderim zamanını kontrol et
+        if os.path.exists(state_file):
+            with open(state_file, 'r') as f:
+                state = json.load(f)
+            last_sent = datetime.fromisoformat(state.get('last_sent', '2020-01-01T00:00:00'))
+            hours_since = (datetime.now() - last_sent).total_seconds() / 3600
+            if hours_since < cooldown_hours:
+                logger.info(f"Piyasa kapalı bildirimi {cooldown_hours - hours_since:.1f} saat sonra gönderilecek")
+                return
+    except Exception:
+        pass
+
+    # Bildirimi gönder ve zamanı kaydet
+    telegram_bot.send_market_closed_notification()
+    try:
+        with open(state_file, 'w') as f:
+            json.dump({'last_sent': datetime.now().isoformat()}, f)
+    except Exception:
+        pass
+
+
 def main():
     """
     Ana bot döngüsü.
     """
+    from datetime import datetime
+
+    # Adım adım bildirim için başlangıç zamanı
+    step_start = datetime.now()
+    steps_completed = []
+
+    def log_step(step_name: str):
+        """Her adımı logla ve listeye ekle"""
+        elapsed = (datetime.now() - step_start).total_seconds()
+        logger.info(f"[{elapsed:.1f}s] {step_name}")
+        steps_completed.append(f"✓ {step_name}")
+
     logger.info("="*50)
     logger.info("⬡ ALTIN TRADER BOT BAŞLADI ⬡")
     logger.info("="*50)
 
     # 1. Piyasa saat kontrolü
-    if not market_hours.is_market_open():
-        logger.info("Piyasa kapalı veya düşük likidite. İşlem yapılmıyor.")
-        telegram_bot.send_market_closed_notification()
+    log_step("Piyasa saati kontrol ediliyor...")
+    market_info = market_hours.get_market_hours_info()
+    is_open = market_info["is_open"]
+
+    if not is_open:
+        log_step("Piyasa KAPALI - İşlem yapılmıyor")
+        logger.info(f"  └─ Sebep: {market_info['session']} (UTC {market_info['hour_utc']}:00)")
+        _send_market_closed_if_needed()
         return
+
+    log_step(f"Piyasa AÇIK ({market_info['session']})")
 
     current_session = market_hours.get_current_session()
     logger.info(f"Mevcut seans: {current_session}")
 
     # 2. Fiyat verilerini çek
-    logger.info("Fiyat verileri çekiliyor...")
+    log_step("Fiyat verileri çekiliyor...")
     price_data = price_fetcher.fetch_gold_price()
 
     if not price_data:
-        logger.error("Fiyat alınamadı, çıkılıyor")
+        log_step("HATA: Fiyat alınamadı!")
         return
+
+    log_step("Fiyat verileri alındı")
 
     xau_usd = price_data["xau_usd"]
     xau_try = price_data["xau_try"]
@@ -64,51 +118,52 @@ def main():
     logger.info(f"XAU/USD: ${xau_usd} | XAU/TRY: ₺{xau_try} | USD/TRY: {usd_try}")
 
     # 3. Veritabanı bağlantısı ve portföy durumu
+    log_step("Veritabanı bağlantısı...")
     conn = portfolio.get_db_connection()
     portfolio.initialize_portfolio(conn)
-
     portfolio_status = portfolio.get_portfolio_status(conn, xau_try)
+
+    log_step("Portföy durumu okundu")
 
     # Stop-loss kontrolü
     if report_generator.check_stop_loss(portfolio_status):
-        logger.error("STOP-LOSS TETİKLENDİ!")
+        log_step("STOP-LOSS TETİKLENDİ!")
         final_report = report_generator.get_total_performance(conn)
         telegram_bot.send_stop_loss_notification(final_report)
         portfolio.update_system_status(conn, "status", "stopped")
+        conn.close()
         return
 
     # Deney süresi doldu mu?
     if report_generator.is_experiment_finished(conn):
-        logger.info("30 günlük deney süresi doldu!")
+        log_step("30 günlük deney süresi doldu!")
         final_report = report_generator.get_total_performance(conn)
         telegram_bot.send_stop_loss_notification(final_report)
         portfolio.update_system_status(conn, "status", "finished")
+        conn.close()
         return
 
     # Günlük rapor zamanı mı?
-    from datetime import datetime
     now = datetime.now()
     if now.hour == config.DAILY_REPORT_HOUR and now.minute < 30:
-        # Günlük özet oluştur ve gönder
+        log_step("Günlük rapor oluşturuluyor...")
         report_generator.generate_daily_summary(conn)
         daily_trades = conn.execute(
             "SELECT COUNT(*) FROM transactions WHERE date(timestamp) = date('now')"
         ).fetchone()[0]
         telegram_bot.send_daily_report(portfolio_status, daily_trades)
 
-    # 4. Teknik indikatörleri hesapla (varsayılan değerler şimdilik)
-    # Gerçek uygulamada historical veri çekilecek
+    # 4. Teknik indikatörleri hesapla
+    log_step("Teknik indikatörler hesaplanıyor...")
     ind = indicators._default_indicators()
-    logger.info(f"İndikatörler: RSI={ind['rsi_14']}, MACD={ind['macd_signal_direction']}")
+    log_step(f"İndikatörler: RSI={ind['rsi_14']}, MACD={ind['macd_signal_direction']}")
 
     # 5. Haber duyarlılık skoru
-    logger.info("Haber duyarlılığı analiz ediliyor...")
+    log_step("Haber analizi yapılıyor...")
     news = news_analyzer.fetch_news_sentiment()
     news_score = news.get("score", 0)
-    logger.info(f"Haber skoru: {news_score}")
-
-    # DXY etkisi (simüle)
     dxy_change = news_analyzer.get_dxy_impact()
+    log_step(f"Haber skoru: {news_score}, DXY: {dxy_change:+.2f}%")
 
     # 6. AI kararı için verileri hazırla
     market_data = {
@@ -125,12 +180,14 @@ def main():
     }
 
     # 7. AI'dan karar al
-    logger.info("AI kararı bekleniyor...")
+    log_step("AI kararı bekleniyor...")
     decision = ai_decision.get_ai_decision(market_data)
 
     if not decision:
-        logger.error("AI kararı alınamadı")
+        log_step("HATA: AI kararı alınamadı!")
         return
+
+    log_step("AI kararı alındı")
 
     # 8. Risk kurallarını uygula
     decision = ai_decision.apply_risk_rules(
@@ -140,13 +197,15 @@ def main():
     )
 
     action = decision.get("action", "HOLD")
-
-    logger.info(f"Karar: {action} | Miktar: {decision.get('amount_grams', 0):.4f} gr | Güven: {decision.get('confidence', 0)*100:.0f}%")
+    log_step(f"KARAR: {action}")
 
     # 9. İşlemi uygula ve bildirim gönder
+    trade_made = False
+
     if action == "BUY":
         grams = decision.get("amount_grams", 0)
         if grams > 0:
+            log_step(f"İŞLEM: ALIM {grams:.4f} gr")
             success = portfolio.execute_trade(
                 conn, "BUY", grams, xau_try,
                 decision.get("reasoning", ""),
@@ -154,7 +213,7 @@ def main():
                 current_session
             )
             if success:
-                # Portföyü güncelle
+                trade_made = True
                 portfolio_status = portfolio.get_portfolio_status(conn, xau_try)
                 telegram_bot.send_trade_notification(
                     "BUY", grams, xau_try,
@@ -167,6 +226,7 @@ def main():
     elif action == "SELL":
         grams = decision.get("amount_grams", 0)
         if grams > 0:
+            log_step(f"İŞLEM: SATIM {grams:.4f} gr")
             success = portfolio.execute_trade(
                 conn, "SELL", grams, xau_try,
                 decision.get("reasoning", ""),
@@ -174,6 +234,7 @@ def main():
                 current_session
             )
             if success:
+                trade_made = True
                 portfolio_status = portfolio.get_portfolio_status(conn, xau_try)
                 telegram_bot.send_trade_notification(
                     "SELL", grams, xau_try,
@@ -184,12 +245,39 @@ def main():
                 )
 
     elif action == "HOLD":
-        # Sadece günde bir kez HOLD bildirimi (opsiyonel)
-        logger.info(f"HOLD: {decision.get('reasoning', 'Şartlar uygun değil')}")
+        log_step(f"HOLD: {decision.get('reasoning', 'Şartlar uygun değil')[:100]}...")
 
     # 10. Portföy durumunu logla
     portfolio_status = portfolio.get_portfolio_status(conn, xau_try)
     print(telegram_bot.format_portfolio_display(portfolio_status))
+
+    # 11. Adım adım özet gönder (sadece piyasa açıkken)
+    total_elapsed = (datetime.now() - step_start).total_seconds()
+    steps_text = "\n".join(steps_completed)
+
+    summary = f"""
+🔄 *BOT ÇALIŞTI - ÖZET*
+━━━━━━━━━━━━━━━━━━━━━━
+⏱️ Süre: {total_elapsed:.1f} saniye
+
+📊 *Adımlar:*
+{steps_text}
+
+📈 *Fiyatlar:*
+• XAU/USD: ${xau_usd}
+• XAU/TRY: ₺{xau_try}
+• USD/TRY: ₺{usd_try}
+
+💼 *Portföy:*
+• Altın: {portfolio_status.get('gold_grams', 0):.2f} gr
+• Nakit: ₺{portfolio_status.get('cash_try', 0):,.0f}
+• Toplam: ₺{portfolio_status.get('total_value_try', 0):,.0f} ({portfolio_status.get('pnl_pct', 0):+.2f}%)
+
+🎯 *Karar:* {action}
+🕐 {datetime.now().strftime('%d %b %H:%M')} TR
+"""
+
+    telegram_bot.send_telegram_message(summary.strip())
 
     # Bağlantıyı kapat
     conn.close()
